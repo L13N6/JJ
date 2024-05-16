@@ -54,10 +54,3 @@ local Button = Tab:CreateButton({
    loadstring(game:HttpGet("https://raw.githubusercontent.com/XNEOFF/FlyGuiV3/main/FlyGuiV3.txt"))()
    end,
 })
-
-local Button = Tab:CreateButton({
-   Name = "Jail Break",
-   Callback = function()
-   loadstring(game:HttpGet("https://raw.githubusercontent.com/L13N6/JJ/main/JB"))()
-   end,
-})
