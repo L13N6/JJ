@@ -40,3 +40,10 @@ local Button = Tab:CreateButton({
    loadstring(game:HttpGet('https://raw.githubusercontent.com/1st-Mars/Annie/main/1st.lua'))()
    end,
 })
+
+local Button = Tab:CreateButton({
+   Name = "Annie Mars",
+   Callback = function()
+   loadstring(game:HttpGet("https://raw.githubusercontent.com/Yatsuraa/Matsune/main/Matsunebeta.lua"))()
+   end,
+})
