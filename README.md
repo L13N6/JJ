@@ -1,2 +1,6 @@
-Special thanks to NerddGupo
-https://github.com/NerddGupo/BloxFruitFinal
+ALL IN ONE PACK ROBLOX SCRIPT
+
+-Roblox Blox Fruits
+-CMD
+-FLY
+More tools i'll add soon
