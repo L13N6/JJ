@@ -1,370 +1,271 @@
 --[[ 
-  Fabled Legacy Auto Farm — Rayfield Hub Integrated
-  For use with dayum hub / standalone
+  Fabled Legacy Auto Farm — Mobile Ready
 ]]
 
--- Auto-re-execute on teleport
-pcall(queue_on_teleport or syn.queue_on_teleport or fluxus.queue_on_teleport,
-    'loadstring(game:HttpGet("https://raw.githubusercontent.com/L13N6/JJ/main/FabledFarm.lua"))()')
+-- Queue on teleport (safety wrapper)
+pcall(function()
+    local qot = queue_on_teleport or (syn and syn.queue_on_teleport) or
+                (fluxus and fluxus.queue_on_teleport)
+    if qot then
+        qot('loadstring(game:HttpGet("https://raw.githubusercontent.com/L13N6/JJ/main/FabledFarm.lua"))()')
+    end
+end)
 
 -- Wait for game
 if not game:IsLoaded() then game.Loaded:Wait() end
+task.wait(1)
 
 -- Services
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
+local RS = game:GetService("ReplicatedStorage")
+local RSvc = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local VU = game:GetService("VirtualUser")
 local HttpService = game:GetService("HttpService")
-local UserInputService = game:GetService("UserInputService")
-local VirtualUser = game:GetService("VirtualUser")
-local TweenService = game:GetService("TweenService")
-
--- Constants
-local SWING = "Swing"
-local SPELL = "useSpell"
-local DUNGEON = "StartDungeon"
-local VOTE = "voteRemote"
-local ENEMIES_FOLDER = workspace:FindFirstChild("Enemies")
 
 -- Player
-local Player = Players.LocalPlayer
-local Character = Player.Character or Player.CharacterAdded:Wait()
-local RootPart
+local Me = Players.LocalPlayer
+local Char = Me.Character or Me.CharacterAdded:Wait()
+local Root
 
--- Config
-local CONFIG_FILE = "fl_farm_cfg.json"
-local cfg = {
-    enabled = false,
-    hoverDist = 12,
-    autoDungeon = true,
-    autoRetry = true,
-    autoReset = false,
-    useQ = true,
-    useE = true,
-    swing = true,
+-- Nama remote (FL umum)
+local REMOTES = {
+    Swing = "Swing",
+    Spell = "useSpell",
+    Dungeon = "StartDungeon",
+    Vote = "voteRemote",
 }
 
-local function loadCfg()
-    if isfile and isfile(CONFIG_FILE) then
-        local s, d = pcall(function() return HttpService:JSONDecode(readfile(CONFIG_FILE)) end)
-        if s and type(d) == "table" then
-            for k, v in pairs(cfg) do if d[k] == nil then d[k] = v end end
-            return d
-        end
+-- Config
+local cfg = { enabled = false, hover = 12, q = true, e = true, swing = true,
+              autoReset = false, autoDungeon = true, autoRetry = true }
+
+-- Load/save config (try pcall wrapper)
+local function tryApi(fn, ...)
+    local s, r = pcall(fn, ...)
+    return s and r
+end
+
+local function readCfg()
+    if tryApi(isfile, "fl_cfg.json") then
+        local d = tryApi(function() return HttpService:JSONDecode(tryApi(readfile, "fl_cfg.json")) end)
+        if d then for k, v in pairs(cfg) do if d[k] == nil then d[k] = v end end; return d end
     end
     return cfg
 end
-cfg = loadCfg()
-local function saveCfg()
-    if writefile then writefile(CONFIG_FILE, HttpService:JSONEncode(cfg)) end
+local function writeCfg()
+    pcall(function()
+        if tryApi(writefile) then
+            tryApi(writefile, "fl_cfg.json", HttpService:JSONEncode(cfg))
+        end
+    end)
 end
+cfg = readCfg()
 
 -- State
-local state = {
-    running = false,
-    enemy = nil,
-    lastDmg = 0,
-    lastHp = nil,
-    healZone = nil,
-    conn = nil,
-    afkConn = nil,
-}
+local S = { on = false, e = nil, dmg = 0, hp = nil, hb = nil, afk = nil }
 
--- Validasi enemy
+-- Enemy helpers
 local function alive(e)
     if not e then return false end
-    local h = e:FindFirstChildOfClass("Humanoid")
-    local r = e:FindFirstChild("HumanoidRootPart")
-    return h and r and h.Health > 0 and e.Parent
+    local h, r = e:FindFirstChildOfClass("Humanoid"), e:FindFirstChild("HumanoidRootPart")
+    return h and h.Health > 0 and r and e.Parent
 end
 
--- Cari enemy
 local function findEnemy(pos)
-    local f = ENEMIES_FOLDER
-    if not f then return nil end
-    local best, bestD = nil, math.huge
-    for _, e in ipairs(f:GetChildren()) do
+    local f = workspace:FindFirstChild("Enemies")
+    if not f then return end
+    local b, bd = nil, 1e9
+    for _, e in pairs(f:GetChildren()) do
         if alive(e) then
             local d = (pos - e.HumanoidRootPart.Position).Magnitude
-            if d < bestD then bestD, best = d, e end
+            if d < bd then bd, b = d, e end
         end
     end
-    return best
+    return b
 end
 
 -- Anti AFK
-local function antiAfk(on)
-    if state.afkConn then state.afkConn:Disconnect() end
+local function afk(on)
+    if S.afk then pcall(S.afk.Disconnect, S.afk) end
     if on then
-        state.afkConn = Player.Idled:Connect(function()
-            VirtualUser:CaptureController()
-            VirtualUser:ClickButton2(Vector2.new())
+        S.afk = Me.Idled:Connect(function()
+            VU:CaptureController()
+            VU:ClickButton2(Vector2.new())
         end)
     end
 end
 
--- Farm loop
-local function farmTick()
-    if not state.running or not Character then return end
-    local root = Character:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-
-    local swing = ReplicatedStorage:FindFirstChild(SWING)
-    local spell = ReplicatedStorage:FindFirstChild(SPELL)
-    if not swing or not spell then return end
-
-    -- Cari enemy baru
-    if not state.enemy or not alive(state.enemy) then
-        state.enemy = findEnemy(root.Position)
-        state.lastHp = nil
-    end
-
-    if state.enemy then
-        local eRoot = state.enemy:FindFirstChild("HumanoidRootPart")
-        if eRoot then
-            -- Face & hover
-            local look = CFrame.lookAt(root.Position, Vector3.new(eRoot.Position.X, root.Position.Y, eRoot.Position.Z))
-            local hover = eRoot.Position + Vector3.new(0, cfg.hoverDist, 0)
-            root.CFrame = CFrame.new(hover, eRoot.Position)
-
-            -- Swing
-            if cfg.swing then pcall(function() swing:FireServer() end) end
-
-            -- Spell Q
-            if cfg.useQ then
-                local qg = Player:FindFirstChild("PlayerGui")
-                if qg then
-                    local c = qg:FindFirstChild("coverQ", true)
-                    if c and not c.Visible then pcall(function() spell:FireServer("Q") end) end
-                end
-            end
-
-            -- Spell E
-            if cfg.useE then
-                local qg = Player:FindFirstChild("PlayerGui")
-                if qg then
-                    local c = qg:FindFirstChild("coverE", true)
-                    if c and not c.Visible then pcall(function() spell:FireServer("E") end) end
-                end
-            end
-
-            -- Damage check
-            if cfg.autoReset then
-                local eh = state.enemy:FindFirstChildOfClass("Humanoid")
-                if eh then
-                    if state.lastHp == nil then
-                        state.lastHp = eh.Health
-                    elseif eh.Health < state.lastHp then
-                        state.lastHp = eh.Health
-                        state.lastDmg = tick()
-                    end
-                end
-            end
-        end
-    end
-
-    -- Auto reset
-    if cfg.autoReset and tick() - state.lastDmg > 10 then
-        local h = Character:FindFirstChildOfClass("Humanoid")
-        if h and h.Health > 0 then h.Health = 0 end
-        state.lastDmg = tick()
-    end
-end
-
--- Auto retry loop
+-- Auto retry
 local function retryLoop()
     if not cfg.autoRetry then return end
     task.spawn(function()
         local vr
-        repeat task.wait(1) vr = ReplicatedStorage:FindFirstChild(VOTE) until vr
-        while state.running and vr do
+        repeat task.wait(1) vr = RS:FindFirstChild(REMOTES.Vote) until vr
+        while S.on and vr do
             pcall(function() vr:FireServer("repeat") end)
             task.wait(2)
         end
     end)
 end
 
--- Start/stop
-local function startFarm()
-    if state.running then return end
-    state.running = true
-    state.lastDmg = tick()
-    Character = Player.Character or Player.CharacterAdded:Wait()
-    RootPart = Character:WaitForChild("HumanoidRootPart")
-    antiAfk(true)
+-- Core tick
+local function tick()
+    if not S.on or not Char then return end
+    local r = Char:FindFirstChild("HumanoidRootPart")
+    if not r then return end
+    local sw, sp = RS:FindFirstChild(REMOTES.Swing), RS:FindFirstChild(REMOTES.Spell)
+    if not sw or not sp then return end
 
-    -- Auto dungeon
-    if cfg.autoDungeon then
-        local dr = ReplicatedStorage:FindFirstChild(DUNGEON)
-        if dr then pcall(function() dr:FireServer(true) end) end
+    if not S.e or not alive(S.e) then
+        S.e = findEnemy(r.Position)
+        S.hp = nil
     end
 
+    if S.e and alive(S.e) then
+        local er = S.e:FindFirstChild("HumanoidRootPart")
+        if er then
+            r.CFrame = CFrame.new(er.Position + Vector3.new(0, cfg.hover, 0), er.Position)
+            if cfg.swing then pcall(sw.FireServer, sw) end
+            if cfg.q then
+                local c = Me.PlayerGui:FindFirstChild("coverQ", true)
+                if c and not c.Visible then pcall(sp.FireServer, sp, "Q") end
+            end
+            if cfg.e then
+                local c = Me.PlayerGui:FindFirstChild("coverE", true)
+                if c and not c.Visible then pcall(sp.FireServer, sp, "E") end
+            end
+            if cfg.autoReset then
+                local eh = S.e:FindFirstChildOfClass("Humanoid")
+                if eh then
+                    if S.hp == nil then S.hp = eh.Health
+                    elseif eh.Health < S.hp then S.hp = eh.Health; S.dmg = tick() end
+                end
+            end
+        end
+    end
+
+    if cfg.autoReset and tick() - S.dmg > 10 then
+        local h = Char:FindFirstChildOfClass("Humanoid")
+        if h and h.Health > 0 then h.Health = 0 end
+        S.dmg = tick()
+    end
+end
+
+-- Start/stop
+local function start()
+    if S.on then return end
+    S.on = true
+    S.dmg = tick()
+    Char = Me.Character or Me.CharacterAdded:Wait()
+    Root = Char:WaitForChild("HumanoidRootPart")
+    afk(true)
+    if cfg.autoDungeon then
+        local dr = RS:FindFirstChild(REMOTES.Dungeon)
+        if dr then pcall(dr.FireServer, dr, true) end
+    end
     retryLoop()
-
-    if state.conn then state.conn:Disconnect() end
-    state.conn = RunService.Heartbeat:Connect(farmTick)
+    if S.hb then S.hb:Disconnect() end
+    S.hb = RSvc.Heartbeat:Connect(tick)
 end
 
-local function stopFarm()
-    state.running = false
-    state.enemy = nil
-    if state.conn then state.conn:Disconnect() end
-    antiAfk(false)
+local function stop()
+    S.on = false; S.e = nil
+    if S.hb then S.hb:Disconnect() end
+    afk(false)
 end
 
--- Character respawn
-Player.CharacterAdded:Connect(function(char)
-    Character = char
-    RootPart = char:WaitForChild("HumanoidRootPart")
+-- Respawn
+Me.CharacterAdded:Connect(function(c)
+    Char = c; Root = c:WaitForChild("HumanoidRootPart")
     task.wait(1)
-    if state.running then
-        Character = char
-        RootPart = char:WaitForChild("HumanoidRootPart")
+    if S.on then end
+end)
+
+-- ─── MOBILE-FRIENDLY GUI ────────────────────────────────────────────────
+
+-- Try to detect if Rayfield is already loaded
+local Rayfield
+pcall(function()
+    -- Check global
+    if _G.Rayfield then Rayfield = _G.Rayfield return end
+    -- Try finding in syn context
+    if syn and syn.running then
+        for _, v in next, syn.threads() do
+            local e = getsenv(v)
+            for k, val in next, e do
+                if type(val) == "table" and val.CreateWindow and val.Flags then
+                    Rayfield = val
+                    return
+                end
+            end
+        end
     end
 end)
 
--- ─── INTEGRATE INTO RAYFIELD HUB ────────────────────────────────────────
-
--- Check if Rayfield is available (loaded from dayum hub)
-local Rayfield = _G.Rayfield or nil
-if not Rayfield then
-    -- Try to find it from the script closure
-    local r = getupvalues(getsenv(getscriptclosure()))
-    for _, v in next, r do
-        if type(v) == "table" and v.Flags and v.CreateWindow then
-            Rayfield = v
-            break
-        end
-    end
-end
-
 if Rayfield then
-    -- Create tab in existing Rayfield
-    local Tab = Rayfield:CreateTab({
-        Name = "Fabled Farm",
-        Image = 4483362458
-    })
+    local Tab = Rayfield:CreateTab({ Name = "Fabled Farm", Image = 4483362458 })
 
+    local toggleRef
     Tab:CreateSection("Auto Farm")
-
-    Tab:CreateToggle({
-        Name = "Auto Farm",
-        Default = cfg.enabled,
-        Callback = function(v)
-            cfg.enabled = v
-            saveCfg()
-            if v then startFarm() else stopFarm() end
-        end
-    })
-
-    Tab:CreateToggle({
-        Name = "Auto Dungeon",
-        Default = cfg.autoDungeon,
-        Callback = function(v)
-            cfg.autoDungeon = v
-            saveCfg()
-        end
-    })
-
-    Tab:CreateToggle({
-        Name = "Auto Retry Lobby",
-        Default = cfg.autoRetry,
-        Callback = function(v)
-            cfg.autoRetry = v
-            saveCfg()
-        end
-    })
-
-    Tab:CreateToggle({
-        Name = "Auto Reset (No Dmg 10s)",
-        Default = cfg.autoReset,
-        Callback = function(v)
-            cfg.autoReset = v
-            saveCfg()
-        end
-    })
-
+    Tab:CreateToggle({ Name = "Auto Farm", Default = cfg.enabled, Callback = function(v)
+        cfg.enabled = v; writeCfg()
+        if v then start() else stop() end
+    end})
+    Tab:CreateToggle({ Name = "Auto Dungeon", Default = cfg.autoDungeon, Callback = function(v)
+        cfg.autoDungeon = v; writeCfg()
+    end})
+    Tab:CreateToggle({ Name = "Auto Retry", Default = cfg.autoRetry, Callback = function(v)
+        cfg.autoRetry = v; writeCfg()
+    end})
+    Tab:CreateToggle({ Name = "Auto Reset (No Dmg)", Default = cfg.autoReset, Callback = function(v)
+        cfg.autoReset = v; writeCfg()
+    end})
     Tab:CreateSection("Abilities")
-
-    Tab:CreateToggle({
-        Name = "Use Q Spell",
-        Default = cfg.useQ,
-        Callback = function(v)
-            cfg.useQ = v
-            saveCfg()
-        end
-    })
-
-    Tab:CreateToggle({
-        Name = "Use E Spell",
-        Default = cfg.useE,
-        Callback = function(v)
-            cfg.useE = v
-            saveCfg()
-        end
-    })
-
-    Tab:CreateToggle({
-        Name = "Swing",
-        Default = cfg.swing,
-        Callback = function(v)
-            cfg.swing = v
-            saveCfg()
-        end
-    })
-
+    Tab:CreateToggle({ Name = "Use Q", Default = cfg.q, Callback = function(v) cfg.q = v; writeCfg() end})
+    Tab:CreateToggle({ Name = "Use E", Default = cfg.e, Callback = function(v) cfg.e = v; writeCfg() end})
+    Tab:CreateToggle({ Name = "Swing", Default = cfg.swing, Callback = function(v) cfg.swing = v; writeCfg() end})
     Tab:CreateSection("Positioning")
-
-    Tab:CreateSlider({
-        Name = "Hover Distance",
-        Min = 5,
-        Max = 50,
-        Default = cfg.hoverDist,
-        Callback = function(v)
-            cfg.hoverDist = v
-            saveCfg()
-        end
-    })
-
-    Tab:CreateLabel("Toggle: K key")
+    Tab:CreateSlider({ Name = "Hover", Min = 5, Max = 50, Default = cfg.hover, Callback = function(v)
+        cfg.hover = v; writeCfg()
+    end})
+    Tab:CreateLabel("K key to toggle farm")
 else
-    -- Standalone mode: fallback chat commands
-    print("Fabled Farm loaded! Chat commands:")
-    print("  /farm on/off")
-    print("  /q, /e, /swing toggle")
-    print("  /dist <number>")
+    -- Fallback: simple notification or print
+    local warnMsg = function(msg)
+        pcall(function()
+            game:GetService("StarterGui"):SetCore("SendNotification", {
+                Title = "Fabled Farm", Text = msg, Duration = 3
+            })
+        end)
+    end
+    warnMsg("Fabled Farm loaded! Use K key or chat commands")
 
-    if cfg.enabled then task.wait(1) startFarm() end
-
-    Player.Chatted:Connect(function(m)
+    -- Chat commands
+    Me.Chatted:Connect(function(m)
         m = m:lower()
-        if m == "/farm on" or m == "/farm" then
-            cfg.enabled = true
-            saveCfg()
-            startFarm()
-        elseif m == "/farm off" then
-            cfg.enabled = false
-            saveCfg()
-            stopFarm()
-        elseif m == "/q" then cfg.useQ = not cfg.useQ saveCfg()
-        elseif m == "/e" then cfg.useE = not cfg.useE saveCfg()
-        elseif m == "/swing" then cfg.swing = not cfg.swing saveCfg()
+        if m == "/farm" then
+            cfg.enabled = not cfg.enabled; writeCfg()
+            if cfg.enabled then start() else stop() end
+            warnMsg(cfg.enabled and "Farm ON" or "Farm OFF")
+        elseif m == "/q" then cfg.q = not cfg.q; writeCfg()
+        elseif m == "/e" then cfg.e = not cfg.e; writeCfg()
+        elseif m == "/swing" then cfg.swing = not cfg.swing; writeCfg()
         elseif m:match("^/dist ") then
             local d = tonumber(m:match("^/dist (.+)"))
-            if d and d >= 5 and d <= 50 then cfg.hoverDist = d saveCfg() end
+            if d and d >= 5 and d <= 50 then cfg.hover = d; writeCfg() end
         end
     end)
 end
 
--- ─── KEYBIND ────────────────────────────────────────────────────────────
-
-UserInputService.InputBegan:Connect(function(inp, gp)
+-- Keybind (K)
+UIS.InputBegan:Connect(function(inp, gp)
     if gp then return end
     if inp.KeyCode == Enum.KeyCode.K then
-        cfg.enabled = not cfg.enabled
-        saveCfg()
-        if cfg.enabled then startFarm() else stopFarm() end
+        cfg.enabled = not cfg.enabled; writeCfg()
+        if cfg.enabled then start() else stop() end
+        warnMsg(cfg.enabled and "Farm ON" or "Farm OFF")
     end
 end)
 
-print("Fabled Farm loaded! (Key: K to toggle)")
+print("Fabled Farm loaded! K to toggle")
